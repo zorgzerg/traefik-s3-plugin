@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/craigbrogle/traefik-s3-plugin/local"
-	"github.com/craigbrogle/traefik-s3-plugin/log"
-	"github.com/craigbrogle/traefik-s3-plugin/s3"
+	"github.com/zorgzerg/traefik-s3-plugin/local"
+	"github.com/zorgzerg/traefik-s3-plugin/log"
+	"github.com/zorgzerg/traefik-s3-plugin/s3"
 )
 
 type Service interface {
@@ -29,6 +29,7 @@ type Config struct {
 	EndpointUrl     string
 	Bucket          string
 	Prefix          string
+	LinkStyle       string
 }
 
 func CreateConfig() *Config {
@@ -62,7 +63,12 @@ func New(_ context.Context, next http.Handler, config *Config, name string) (htt
 			config.Region = os.Getenv("AWS_DEFAULT_REGION")
 		}
 
-		plugin.service = s3.New(config.AccessKeyId, config.SecretAccessKey, config.EndpointUrl, config.Region, config.Bucket, config.Prefix, config.TimeoutSeconds)
+		// Default for LinkStyle
+		if config.LinkStyle == "" {
+			config.LinkStyle = "vhost"
+		}
+
+		plugin.service = s3.New(config.AccessKeyId, config.SecretAccessKey, config.EndpointUrl, config.Region, config.Bucket, config.Prefix, config.LinkStyle, config.TimeoutSeconds)
 		return plugin, nil
 	case "local":
 		plugin.service = local.New(config.Directory)

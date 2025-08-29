@@ -14,7 +14,7 @@ services:
       # Default location
       - ./traefik.yml:/etc/traefik/traefik.yml
       # Plugin sources
-      - .:/app/plugins-local/src/github.com/craigbrogle/traefik-s3-plugin/
+      - .:/app/plugins-local/src/github.com/zorgzerg/traefik-s3-plugin/
       # Local directory
       - ./storage:/app/aws-local-directory
     labels:

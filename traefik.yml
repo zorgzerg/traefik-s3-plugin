@@ -9,4 +9,4 @@ providers:
 experimental:
   localPlugins:
     traefik-s3-plugin:
-      moduleName: github.com/craigbrogle/traefik-s3-plugin
+      moduleName: github.com/zorgzerg/traefik-s3-plugin
