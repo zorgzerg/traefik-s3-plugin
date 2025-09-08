@@ -9,9 +9,89 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
+
+func generatePresignedURL(accessKeyID, secretAccessKey, region, endpoint, bucket, linkStyle, key string) (string, error) {
+	escapedKey := url.PathEscape(key)
+
+	var host, canonicalURI string
+
+	switch linkStyle {
+	case "path":
+		// path-style: https://endpoint/bucket/key
+		host = endpoint
+		canonicalURI = fmt.Sprintf("/%s/%s", bucket, escapedKey)
+	case "vhost":
+		// virtual-hosted-style: https://bucket.endpoint/key
+		host = fmt.Sprintf("%s.%s", bucket, endpoint)
+		canonicalURI = fmt.Sprintf("/%s", escapedKey)
+	default:
+		return "", errors.New("invalid LinkStyle param")
+	}
+
+	t := time.Now().UTC()
+	date := t.Format("20060102")
+	timestamp := t.Format("20060102T150405Z")
+
+	// Step 1: Build query parameters (without signature)
+	query := url.Values{}
+	query.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	query.Set("X-Amz-Credential", fmt.Sprintf("%s/%s/%s/s3/aws4_request", accessKeyID, date, region))
+	query.Set("X-Amz-Date", timestamp)
+	query.Set("X-Amz-Expires", "86400")
+	query.Set("X-Amz-SignedHeaders", "host")
+
+	// Step 2: Canonical query string (sorted)
+	keys := make([]string, 0, len(query))
+	for k := range query {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var canonicalQueryParts []string
+	for _, k := range keys {
+		for _, v := range query[k] {
+			canonicalQueryParts = append(canonicalQueryParts, fmt.Sprintf("%s=%s", url.QueryEscape(k), url.QueryEscape(v)))
+		}
+	}
+	canonicalQueryString := strings.Join(canonicalQueryParts, "&")
+
+	// Step 3: Canonical request
+	canonicalHeaders := fmt.Sprintf("host:%s\n", host)
+	signedHeaders := "host"
+	payloadHash := "UNSIGNED-PAYLOAD"
+
+	canonicalRequest := strings.Join([]string{
+		"GET",
+		canonicalURI,
+		canonicalQueryString,
+		canonicalHeaders,
+		signedHeaders,
+		payloadHash,
+	}, "\n")
+
+	// Step 4: String to sign
+	credentialScope := fmt.Sprintf("%s/%s/s3/aws4_request", date, region)
+	stringToSign := strings.Join([]string{
+		"AWS4-HMAC-SHA256",
+		timestamp,
+		credentialScope,
+		hex.EncodeToString(hashSHA256(canonicalRequest)),
+	}, "\n")
+
+	// Step 5: Signature
+	signingKey := getSigningKey(secretAccessKey, date, region)
+	signature := hmacSHA256Hex(signingKey, stringToSign)
+
+	// Step 6: Final URL
+	query.Set("X-Amz-Signature", signature)
+	finalURL := fmt.Sprintf("https://%s%s?%s", host, canonicalURI, query.Encode())
+
+	return finalURL, nil
+}
 
 // Helper function to create the HMAC-SHA256 hash
 func hmacSHA256(key []byte, data string) []byte {
@@ -32,64 +112,12 @@ func hashSHA256(payload string) []byte {
 	return h.Sum(nil)
 }
 
-// Generate a presigned URL for an S3 GetObject request
-func generatePresignedURL(accessKeyID, secretAccessKey, region, endpoint, bucket, key string, duration time.Duration) (string, error) {
-	urlStr := fmt.Sprintf("https://%s.%s/%s", bucket, endpoint, key)
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		return "", err
-	}
-
-	t := time.Now().UTC()
-	date := t.Format("20060102")
-	timestamp := t.Format("20060102T150405Z")
-
-	// Query parameters for the presigned URL
-	query := url.Values{}
-	query.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
-	query.Set("X-Amz-Credential", fmt.Sprintf("%s/%s/%s/s3/aws4_request", accessKeyID, date, region))
-	query.Set("X-Amz-Date", timestamp)
-	// query.Set("X-Amz-Expires", fmt.Sprintf("%d", int(duration.Seconds())))
-	query.Set("X-Amz-Expires", "86400")
-	query.Set("X-Amz-SignedHeaders", "host")
-
-	// Canonical request components
-	canonicalURI := parsedURL.Path
-	canonicalQueryString := query.Encode()
-	canonicalHeaders := fmt.Sprintf("host:%s\n", parsedURL.Host)
-	signedHeaders := "host"
-	payloadHash := "UNSIGNED-PAYLOAD"
-
-	canonicalRequest := strings.Join([]string{
-		"GET",
-		canonicalURI,
-		canonicalQueryString,
-		canonicalHeaders,
-		signedHeaders,
-		payloadHash,
-	}, "\n")
-
-	// Create the string to sign
-	credentialScope := fmt.Sprintf("%s/%s/s3/aws4_request", date, region)
-	stringToSign := strings.Join([]string{
-		"AWS4-HMAC-SHA256",
-		timestamp,
-		credentialScope,
-		hex.EncodeToString(hashSHA256(canonicalRequest)),
-	}, "\n")
-
-	// Calculate the signature
-	signingKey := hmacSHA256([]byte("AWS4"+secretAccessKey), date)
-	signingKey = hmacSHA256(signingKey, region)
-	signingKey = hmacSHA256(signingKey, "s3")
-	signingKey = hmacSHA256(signingKey, "aws4_request")
-	signature := hmacSHA256Hex(signingKey, stringToSign)
-
-	// Add the signature to the query parameters
-	query.Set("X-Amz-Signature", signature)
-	parsedURL.RawQuery = query.Encode()
-
-	return parsedURL.String(), nil
+func getSigningKey(secret, date, region string) []byte {
+	kDate := hmacSHA256([]byte("AWS4"+secret), date)
+	kRegion := hmacSHA256(kDate, region)
+	kService := hmacSHA256(kRegion, "s3")
+	kSigning := hmacSHA256(kService, "aws4_request")
+	return kSigning
 }
 
 type S3 struct {
@@ -99,10 +127,11 @@ type S3 struct {
 	endpoint        string
 	bucket          string
 	prefix          string
+	linkStyle       string
 	timeoutSeconds  int
 }
 
-func New(accessKeyID, secretAccessKey, endpoint, region, bucket, prefix string, timeoutSeconds int) *S3 {
+func New(accessKeyID, secretAccessKey, endpoint, region, bucket, prefix, linkStyle string, timeoutSeconds int) *S3 {
 	return &S3{
 		accessKeyID:     accessKeyID,
 		secretAccessKey: secretAccessKey,
@@ -110,6 +139,7 @@ func New(accessKeyID, secretAccessKey, endpoint, region, bucket, prefix string, 
 		endpoint:        endpoint,
 		bucket:          bucket,
 		prefix:          prefix,
+		linkStyle:       linkStyle,
 		timeoutSeconds:  timeoutSeconds,
 	}
 }
@@ -117,9 +147,8 @@ func New(accessKeyID, secretAccessKey, endpoint, region, bucket, prefix string, 
 // Get fetches the object from S3 and writes it to the response writer.
 func (s *S3) Get(path string, rw http.ResponseWriter) ([]byte, error) {
 	key := s.prefix + path
-	duration := 15 * time.Minute
 
-	urlStr, err := generatePresignedURL(s.accessKeyID, s.secretAccessKey, s.region, s.endpoint, s.bucket, key, duration)
+	urlStr, err := generatePresignedURL(s.accessKeyID, s.secretAccessKey, s.region, s.endpoint, s.bucket, s.linkStyle, key)
 	if err != nil {
 		http.Error(rw, fmt.Sprintf("unable to generate presigned URL, %v", err), http.StatusInternalServerError)
 		return nil, err

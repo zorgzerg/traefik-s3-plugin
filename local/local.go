@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/craigbrogle/traefik-s3-plugin/log"
+	"github.com/zorgzerg/traefik-s3-plugin/log"
 )
 
 type Local struct {
